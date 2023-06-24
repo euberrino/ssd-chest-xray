@@ -1,0 +1,282 @@
+---
+title: "Clasificador Binario de Consolidaciones"
+author: "Por Eugenia Berrino"
+date: "17/5/2021"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(comment = NA)
+setwd("~/Tesis")
+library(ggplot2)
+library(ggpubr)
+library(nortest)
+suppressPackageStartupMessages(library(faraway))
+library(pROC)
+library(gtools)
+library(ROCR)
+library(pander)
+library(formattable)
+```
+
+\section{Importación de Datos}
+
+```{r cars}
+data <- read.csv('final_results_v1.csv', header = TRUE, sep = ',')
+names(data)[3] <- "bb_cmax"
+names(data)[4] <- "bb_cmean"
+names(data)[5] <- "bb_cmedian"
+data$class_name = as.factor(data$class_name)
+pander(summary(data))
+```
+
+\section{Modelos de Regression Logistica}
+
+Resulta importante comenzar aclarando que en el contexto de este modelo al hacer referencia al train set, estamos hablando del "extended test set" ya procesado por el algoritmo de detección de objetos YOLO, mientras que el test set es el conjunto de imágenes "de validación" dadas por el HIBA. \
+
+A continuación, se definen los modelos en base a los datos de test extendido del dataset VinBigData. El enfoque definido para determinar la presencia o ausencia de consolidaciones en imágenes a partir de los resultados de nuestro algoritmo de detección de objetos es el siguiente: Se seleccionan como variables de salida la cantidad de bounding boxes detectadas para cada una de las imágenes y un valor de confianza "resumen" obtenido a partir de los valores de confianza de los bounding boxes de esas imágenes. Con dichas variables, se ajustan los coeficientes correspondientes a dichos modelos y finalmente se comparan los diferentes modelos con el objetivo de escoger uno de ellos para realizar la prueba final en las imágenes del Hospital.\ 
+
+El tipo de modelo a utilizarse es de regresión logística debido a que contamos con una variable dependiente dicotómica. Este tipo de modelos son muy similares a las regresiones lineales, con la diferencia que la variable de salida es transformada para representar una probabilidad de pertenencia a una determinada clase. Dicho objetivo se consigue gracias al uso de la función link sigmoidea, la cual se presenta a continuación: 
+
+\begin{equation}
+\sigma(x) = \frac{1}{1+e^{(-x)}} 
+\end{equation}
+
+\subsection{Modelo 1}
+El primer modelo propuesto es el siguiente:
+\begin{equation}
+logit(P) = \ln(\frac{P}{1-P}) = \alpha_0  + \alpha_1 * BB_{counts} + \alpha_2 * BB_{cmax}
+\end{equation}
+
+donde, $logit(P)$ es el logaritmo natural del ODDS del evento, $\alpha_i$ son los coeficientes que van a ser calculados mediante el método de máxima verosimilitud de manera de optimizar la predicción correcta, y $BB_{counts}$ y $BB_{cmax}$ representan las variables de nuestro modelo.\
+
+El método de máxima verosimilitud se basa en la idea de que la muestra obtenida, por haber ocurrido tiene una alta probabilidad de ocurrir y estima los parámetros como aquellos que maximizan la probabilidad de obtener nuestra muestra.Esto se logra maximizando la función de verosimilitud, que es la función de probabilidad conjunta de la muestra. Este proceso que se realiza de manera iterativa.\
+
+$BB_{counts}$ representa el número de bounding boxes que el modelo de detección de objetos encontró para una dada imagen y $BB_{cmax}$ la confianza máxima detectada para bounding box en dicha imagen. El motivo por el cual se consideró incluir esta última variable y considerarla para el primer modelo se fundamenta en el hecho de que es suficiente poseer una bounding box que el algoritmo determina con un elevado valor de confianza para que dicha imagen ya sea clasificada como perteneciente a la clase de consolidación. \
+
+$\alpha_0$ representa la ordenada al origen, $\alpha_1$ es el coeficiente que acompaña a la variables $BB_{counts}$ y por lo tanto, un aumento unitario en la cantidad de cajas que detecta el algoritmo implica un aumento equivalente al valor de este coeficiente en $logit(P)$. Dicho comportamiento es análogo para $\alpha_2$ y $BB_{cmax}$\
+
+Previo al entrenamiento del modelo, definimos la variable "consolidation" para garantizar que el modelo tome como outcomes positivos los pertenecientes a dicha clase y como negativos a los pertenecientes a No Finding.
+
+```{r }
+data$consolidation[data$class_name == "Consolidation"] <- 1
+data$consolidation[data$class_name == "No finding"] <- 0
+```
+
+Ahora si, corremos el modelo. 
+```{r}
+m1 <- glm(consolidation ~ bb_counts + bb_cmax , data = data, family = "binomial")
+summary(m1)
+```
+Podemos ver en los resultados de la regresión logística, que el modelo arroja una gran variedad de parámetros. El primero de ellos que resulta interesante de analizar es el P-valor que acompaña a cada una de las variables. El hecho de encontrar un p-valor implica que se realizó un test de hipótesis. En este caso, el test de hipótesis es conocido como test de Wald, y plantea como hipótesis las siguientes: \ 
+
+$H_0:$ $\alpha_i$ $=$ $0$ \
+
+$H_1:$ $\alpha_i$ $\neq$ $0$ \
+
+Es decir, que para cada una de las variables $alpha_i$ se realizó un test de hipótesis separado en el que se asumió que su valor era cero, se calculó el estádístico del test y se obtuvo la probabilidad de que dicho valor sea obtenido producto del azar dado que la hipótesis nula es verdadera. El resultado de dicha probabilidad es tan pequeño que nos permite concluir con un nivel de significancia superior a 0.001 que los valores de cada una de dichas variables son diferentes a cero. Por lo tanto, se debe rechazar la hipótesis nula y por ende aceptar la hipótesis alternativa. \
+
+Otro parámetro que resulta interesante tener en cuenta a la hora de analizar el modelo de regresión logística son los valores de los $\alpha_i$, devueltos por el modelo como "Estimate". Tal como se explicó anteriormente, dichos parámetros representan la variación en la logit(P) para una variación unitaria de la variable del modelo que acompañan. Del modelo podemos concluir que por cada bounding box que detecta, el ODDS ratio  
+
+A su vez, el modelo devuelve los residuos que son la diferencia entre los valores de nuestro train set y las predicciones que arroja el modelo. Por lo tanto, un resultado negativo implica una sobreestimación de la variable dependiente, mientras que uno positivo una subestimación. En este caso en particular, podemos ver como hasta el tercer cuartil es negativo. Sin embargo, debemos tener cuidado para no saltar a conclusiones al respecto, debido a que el $80\%$ de nuestro train set son imágenes No finding, por lo que su valor es negativo. CHARLAR CON CANDE. (los residuos no se encuentran en el rango 1-0).
+
+\subsection{Modelo 2}
+
+\begin{equation}
+logit(P) = \alpha_0  + \alpha_1 * BB_{counts} + \alpha_2 * BB_{cmean}
+\end{equation}
+```{r } 
+m2 <- glm(consolidation ~ bb_counts + bb_cmean , data = data, family = "binomial")
+summary(m2)
+
+```
+\subsection{Modelo 3}
+\begin{equation}
+logit(P) = \alpha_0  + \alpha_1 * BB_{counts} + \alpha_2 * BB_{cmedian}
+\end{equation}
+```{r }
+m3 <- glm(consolidation ~ bb_counts + bb_cmedian , data = data, family = "binomial")
+summary(m3)
+```
+
+\subsection{Modelo 4}
+\begin{equation}
+logit(P) = \alpha_0  + \alpha_1 * BB_{counts} + \alpha_2 * BB_{cmax} 
++ \alpha_3*  BB_{cmax}* BB_{counts}
+\end{equation}
+```{r }
+m4 <- glm(consolidation ~ bb_counts*bb_cmax , data = data, family = "binomial")
+summary(m4)
+
+```
+
+\subsection{Modelo 5}
+\begin{equation}
+logit(P) = \alpha_0  + \alpha_1 * BB_{counts} 
+\end{equation}
+```{r }
+m5 <- glm(consolidation ~ bb_counts, data = data, family = "binomial")
+summary(m5)
+```
+
+\subsection{Modelo 6}
+\begin{equation}
+logit(P) = \alpha_0  + \alpha_1 * BB_{cmax} 
+\end{equation}
+```{r }
+m6 <- glm(consolidation ~ bb_cmax , data = data, family = "binomial")
+summary(m6)
+```
+
+
+\subsubsection{Comparación de modelos}
+Para comparar los diferentes modelos, se utilizó el valor arrojado por cada uno bajo el nombre de AIC. El AIC, o Akaike's Information Criterion o Criterio de Información de Akaike, se calcula de la siguiente manera: 
+\begin{equation}
+AIC = 2\ln(\frac{e^k}{L})
+\label{eq}
+\end{equation}
+Donde k representa la cantidad de parámetros del modelo, mientras que L la función de máxima verosimilitud ya optimizada. \ 
+
+Es decir, el criterio toma en cuenta tanto la cantidad de variables incluidas en el modelo, penalizando modelos más complejos, así como tambien la bondad de ajuste del modelo, favoreciendo a los modelos que mejor ajuste producen. Esto permite escoger los mejores modelos, evitando el \textit{overfitting}. \
+
+Con la anterior información y teniendo en cuenta la expresión \ref{eq}, se puede concluir que un menor AIC se corresponde con un mejor modelo.\
+
+Además de utilizar el AIC para escoger el mejor modelo, se calculo el área debajo de la curva ROC para diferentes puntos de corte para cada uno de los modelos. Los resultados obtenidos en ambos casos se muestran a continuación: 
+```{r }
+prob=predict(m1,type=c("response"))
+data$prob = prob
+roc1 <- roc(consolidation ~ prob, data = data)
+
+prob=predict(m2,type=c("response"))
+data$prob = prob
+roc2 <- roc(consolidation ~ prob, data = data)
+
+prob=predict(m3,type=c("response"))
+data$prob = prob
+roc3 <- roc(consolidation ~ prob, data = data)
+
+prob=predict(m4,type=c("response"))
+data$prob = prob
+roc4 <- roc(consolidation ~ prob, data = data)
+
+prob=predict(m5,type=c("response"))
+data$prob = prob
+roc5 <- roc(consolidation ~ prob, data = data)
+
+prob=predict(m6,type=c("response"))
+data$prob = prob
+roc6 <- roc(consolidation ~ prob, data = data)
+
+```
+```{r }
+tab <- matrix(c(roc1$auc, roc2$auc, roc3$auc, 
+                roc4$auc, roc5$auc, roc6$auc, 
+                m1$aic, m2$aic, m3$aic, 
+                m4$aic,m5$aic,m6$aic), ncol=2, byrow=FALSE)
+colnames(tab) <- c('AUC','AIC')
+rownames(tab) <- c('m1','m2','m3','m4','m5','m6')
+tab <- as.table(tab)
+formattable(tab, 
+            align = "r")# INVESTIGAR COMO HACER LINDAS TABLAS CON ESTO
+```
+
+
+```{r }
+
+ggroc(list("Modelo 1" = roc1, "Modelo 2" = roc2,
+           "Modelo 3" = roc3, "Modelo 4" = roc4,
+           "Modelo 5" = roc5, "Modelo 6" = roc6), legacy.axes = T) +
+geom_abline(slope = 1 ,intercept = 0) + # add identity line
+theme(
+panel.background = element_blank(), 
+axis.title.x = element_text(size =18, face = 'bold'),
+axis.title.y = element_text(size =18, face = 'bold'),
+panel.border = element_rect(size = 2, fill = NA), 
+axis.text.x = element_text(size = 14, face ='bold'),
+axis.text.y = element_text(size = 14, face ='bold')) +
+xlab('100% - Especificidad') +
+ylab('Sensibilidad') +
+scale_x_continuous(breaks = seq(0,1,0.25), labels = seq(0,1,0.25) * 100) + 
+scale_y_continuous(breaks = seq(0,1,0.25), labels = seq(0,1,0.25) * 100) 
+```
+
+Debido a los resultados resumidos en la tabla anterior, a que la diferencia entre los dos mejores modelos es ínfima, se escogió el modelo m1. 
+
+\subsection{Clasificación Test set}
+
+
+```{r }
+data_h <- read.csv('final_results_hiba.csv', header = TRUE, sep = ',')
+names(data_h)[3] <- "bb_cmax"
+names(data_h)[4] <- "bb_cmean"
+names(data_h)[5] <- "bb_cmedian"
+data_h$class = as.factor(data_h$class)
+summary(data_h)
+data_h$consolidation[data_h$class == "Consolidation"] <- 1
+data_h$consolidation[data_h$class == "No finding"] <- 0
+prob=predict(m1,newdata= data_h,type = "response")
+data_h$prob = prob
+write.csv(x=data_h, file="prediccion_binaria.csv")
+roc1 <- roc(consolidation ~ prob,data = data_h)
+roc1$auc
+
+ggroc(roc1,alpha = 1, colour = "red",
+      linetype = 2, size = 1, legacy.axes = T) +
+geom_abline(slope = 1 ,intercept = 0) + # add identity line
+theme(
+panel.background = element_blank(), 
+axis.title.x = element_text(size =18, face = 'bold'),
+axis.title.y = element_text(size =18, face = 'bold'),
+panel.border = element_rect(size = 2, fill = NA), 
+axis.text.x = element_text(size = 14, face ='bold'),
+axis.text.y = element_text(size = 14, face ='bold')) +
+xlab('100% - Especificidad') +
+ylab('Sensibilidad') +
+scale_x_continuous(breaks = seq(0,1,0.25), labels = seq(0,1,0.25) * 100) + 
+scale_y_continuous(breaks = seq(0,1,0.25), labels = seq(0,1,0.25) * 100) +
+  annotate("text", x = .25, y = .75,size = 5,colour = 'red', label = paste("AUC =", round(roc1$auc,4)))
+```
+
+
+A continuación, calculamos la curva de Precision - Recall, que por tratarse de un dataset desbalanceado, mide más estrictamente la calidad del modelo. 
+```{r }
+
+predobj <- prediction(data_h$prob, data_h$consolidation)
+perf <- performance(predobj,"prec", "rec")
+plot(perf,ylim=c(0,1))
+
+x = perf@x.values[[1]]
+y = perf@y.values[[1]]
+
+idx = 2:length(x)
+testdf=data.frame(recall = (x[idx] - x[idx-1]), precision = (y[idx] + y[idx-1]))
+
+# Ignore NAs
+testdf = subset(testdf, !is.na(testdf$precision))
+(AUPRC = sum(testdf$recall * testdf$precision)/2)
+
+# ROC Curve
+(AUROC <- performance(predobj,"auc")@y.values)
+```
+
+
+```{r,include=FALSE}
+require(ggplot2)
+require(plyr)
+require(reshape2)
+require(ggiraph)
+require(rgl)
+require(ggiraphExtra)
+```
+
+```{r }
+ggPredict(m1,colorn=2)
+ggPredict(m5,se=TRUE)
+ggPredict(m6)
+```
+
+Podemos ver que en ambos casos no existe separatividad lineal, es decir, sin importar el umbral que se escoja el modelo no es capaz de aislar perfectamente el grupo de Consolidaciones del de No findings.
